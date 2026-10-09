@@ -1,42 +1,45 @@
 #include <Arduino.h>
 #include <ArduinoJson.h>
 
+#include "config.h"
+#include "sensors.h"
+#include "analytics.h"
+#include "rs485_comm.h"
+
 // =========================
-// PIN CONFIGURATION
+// SETUP
 // =========================
-#define MQ2_PIN     34
-#define FLAME_PIN   27
-#define BUZZER_PIN  25
 
-// Tạm thời dùng để test
-#define MQ2_THRESHOLD 750
-
-// ID của node
-const char* NODE_ID = "NODE_KITCHEN_01";
-
-
-void setup() {
-
-    Serial.begin(115200);
+void setup()
+{
+    Serial.begin(SERIAL_BAUDRATE);
 
     // =========================
-    // MQ-2 ADC
+    // INITIALIZE SENSORS
     // =========================
-    analogReadResolution(12);
+
+    sensors_init();
 
     // =========================
-    // Flame Sensor
+    // INITIALIZE BUZZER
     // =========================
-    pinMode(FLAME_PIN, INPUT);
 
-    // =========================
-    // Buzzer
-    // =========================
     pinMode(BUZZER_PIN, OUTPUT);
 
     // Buzzer Active-Low
     // HIGH = OFF
-    digitalWrite(BUZZER_PIN, HIGH);
+
+    digitalWrite(BUZZER_PIN, BUZZER_OFF);
+
+    // =========================
+    // INITIALIZE RS485
+    // =========================
+
+    rs485_init();
+
+    // =========================
+    // START MESSAGE
+    // =========================
 
     Serial.println();
     Serial.println("================================");
@@ -46,159 +49,120 @@ void setup() {
     Serial.println("================================");
 }
 
+// =========================
+// LOOP
+// =========================
 
-void loop() {
-
+void loop()
+{
     // =========================
-    // 1. READ MQ-2
-    // =========================
-
-    int mq2Value = analogRead(MQ2_PIN);
-
-
-    // =========================
-    // 2. READ FLAME SENSOR
+    // 1. READ SENSORS
     // =========================
 
-    int flameValue = digitalRead(FLAME_PIN);
-
-    // Với module Flame Sensor của bạn:
-    // LOW  = phát hiện lửa
-    // HIGH = không có lửa
-
-    bool flameDetected = (flameValue == LOW);
-
+    SensorData sensorData = sensors_read();
 
     // =========================
-    // 3. CHECK SMOKE
+    // 2. ANALYZE DATA
     // =========================
 
-    bool smokeDetected = (mq2Value >= MQ2_THRESHOLD);
-
-
-    // =========================
-    // 4. FIRE ALARM
-    // =========================
-
-    bool alarm = smokeDetected || flameDetected;
-
+    AnalyticsData analytics =
+        analyze_data(sensorData);
 
     // =========================
-    // 5. BUZZER
+    // 3. CONTROL BUZZER
     // =========================
 
-    // Buzzer của bạn là Active-Low
-    //
-    // LOW  = ON
-    // HIGH = OFF
-
-    if (alarm) {
-
-        digitalWrite(BUZZER_PIN, LOW);
-
-    } else {
-
-        digitalWrite(BUZZER_PIN, HIGH);
+    if (analytics.alarm)
+    {
+        digitalWrite(BUZZER_PIN, BUZZER_ON);
+    }
+    else
+    {
+        digitalWrite(BUZZER_PIN, BUZZER_OFF);
     }
 
-
     // =========================
-    // 6. STATUS
-    // =========================
-
-    const char* status;
-
-    if (alarm) {
-
-        status = "WARNING";
-
-    } else {
-
-        status = "NORMAL";
-    }
-
-
-    // =========================
-    // 7. CREATE JSON DOCUMENT
+    // 4. CREATE JSON DOCUMENT
     // =========================
 
     JsonDocument doc;
 
-
     // =========================
-    // 8. BASIC INFORMATION
+    // 5. BASIC INFORMATION
     // =========================
 
     doc["node_id"] = NODE_ID;
 
     // Tạm thời chưa có NTP
-    // Sau này sẽ thay bằng Unix timestamp thực
     doc["timestamp"] = 0;
 
-
     // =========================
-    // 9. SENSORS
+    // 6. SENSOR DATA
     // =========================
 
-    JsonObject sensors = doc["sensors"].to<JsonObject>();
+    JsonObject sensors =
+        doc["sensors"].to<JsonObject>();
 
-    // DS18B20 chưa tích hợp vào code này
+    // DS18B20 chưa tích hợp
     sensors["temp"] = nullptr;
 
-  
-    // LƯU Ý:
-    // Giá trị MQ-2 hiện tại là ADC,
-    // chưa phải ppm thực tế.
-    sensors["smoke_adc"] = mq2Value;
+    // MQ-2 hiện tại là ADC
+    sensors["smoke_adc"] =
+        sensorData.mq2Value;
+
+    // Chưa chuyển sang PPM
     sensors["smoke_ppm"] = nullptr;
 
-    sensors["flame"] = flameDetected;
-
+    // Flame
+    sensors["flame"] =
+        sensorData.flameDetected;
 
     // =========================
-    // 10. ANALYTICS
+    // 7. ANALYTICS
     // =========================
 
-    JsonObject analytics = doc["analytics"].to<JsonObject>();
+    JsonObject analyticsObject =
+        doc["analytics"].to<JsonObject>();
 
-    // Chưa triển khai thuật toán ROR
-    analytics["ror"] = nullptr;
+    // Chưa triển khai ROR
+    analyticsObject["ror"] = nullptr;
 
     // Chưa triển khai FRI
-    analytics["fri"] = nullptr;
-
+    analyticsObject["fri"] = nullptr;
 
     // =========================
-    // 11. ACTUATORS
+    // 8. ACTUATORS
     // =========================
 
-    JsonObject actuators = doc["actuators"].to<JsonObject>();
+    JsonObject actuators =
+        doc["actuators"].to<JsonObject>();
 
     // Chưa có Relay
     actuators["relay"] = false;
 
-    // Trạng thái thực tế của Buzzer
-    actuators["buzzer"] = alarm;
-
+    // Buzzer thực tế
+    actuators["buzzer"] =
+        analytics.alarm;
 
     // =========================
-    // 12. STATUS
+    // 9. STATUS
     // =========================
 
-    doc["status"] = status;
+    doc["status"] =
+        analytics.status;
 
     // 0 = không có lỗi
     doc["error_code"] = 0;
 
+    // =========================
+    // 10. SEND JSON
+    // =========================
+
+    rs485_send_json(doc);
 
     // =========================
-    // 13. OUTPUT JSON
+    // LOOP DELAY
     // =========================
-
-    serializeJsonPretty(doc, Serial);
-
-    Serial.println();
-    Serial.println("--------------------------------");
 
     delay(1000);
 }
